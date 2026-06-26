@@ -1,0 +1,243 @@
+    'burns-abbeville-will-books-volume-1-1947': {'volume': '1'},
+    'dayton-daily-news-1953-02-24': {'author': '{{Dayton Daily News}}'},
+    'jackson-standard-early-marriages-1870-02-17': {'author': '{{Jackson Standard}}'},
+}
+
+ALLOWED_FIELDS = {
+    'book': {'author','editor','title','subtitle','titleaddon','maintitle','mainsubtitle','volume','part','edition','volumes','series','number','note','publisher','location','isbn','issn','date','year','month','url','urldate','keywords','filename'},
+    'collection': {'editor','title','subtitle','titleaddon','maintitle','mainsubtitle','volume','part','edition','volumes','series','number','note','publisher','location','isbn','issn','date','year','month','url','urldate','keywords','filename'},
+    'article': {'author','editor','title','subtitle','titleaddon','journaltitle','journal','volume','number','pages','date','year','month','note','url','urldate','keywords','filename'},
+    'incollection': {'author','editor','title','subtitle','titleaddon','booktitle','publisher','location','pages','volume','part','edition','series','number','date','year','month','note','url','urldate','keywords','filename'},
+    'online': {'author','editor','title','subtitle','titleaddon','language','version','note','organization','date','year','month','url','urldate','keywords','filename'},
+    'misc': {'author','editor','title','subtitle','titleaddon','howpublished','type','version','note','organization','location','date','year','month','url','urldate','keywords','filename'},
+}
+
+
+def plain(s: str) -> str:
+    s = s or ''
+    s = re.sub(r'\\url\{([^}]*)\}', r'\1', s)
+    s = s.replace('~', ' ').replace('{', '').replace('}', '')
+    s = s.replace('\\&', '&').replace('\\_', '_')
+    return ' '.join(s.split())
+
+
+def norm(s: str) -> str:
+    s = plain(s)
+    s = re.sub(r'[\u2010-\u2015\u2212]', ' ', s)
+    s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('ascii')
+    s = s.casefold().replace('&', ' and ')
+    return ' '.join(re.sub(r'[^a-z0-9]+', ' ', s).split())
+
+
+def slug(s: str, max_words: int = 14) -> str:
+    words = norm(s).split()
+    return '-'.join(words[:max_words]) or 'source'
+
+
+def platform(e: Entry) -> str:
+    d = e.field_dict()
+    url = plain(d.get('url', '')).lower()
+    auth = ' '.join(plain(d.get(x, '')) for x in ('author','organization','publisher','institution')).lower()
+    alltext = ' '.join([e.key] + [plain(v) for v in d.values()]).lower()
+    if 'newspapers.com' in url:
+        return 'newspapers'
+    if 'familysearch.org' in url:
+        return 'familysearch'
+    if 'ancestry.com' in url or 'ancestry.com' in auth:
+        return 'ancestry'
+    if 'wikitree.com' in url or 'wikitree' in alltext:
+        return 'wikitree'
+    if 'familysearch' in auth or 'familysearch' in alltext:
+        return 'familysearch'
+    if 'ancestry' in auth or 'accessed via ancestry' in alltext:
+        return 'ancestry'
+    return 'other'
+
+
+def ark_token(e: Entry) -> str:
+    u = plain(e.field_dict().get('url', ''))
+    m = re.search(r'/ark:/61903/(?:1:1|3:1):([^?/#]+)', u)
+    return m.group(1).lower() if m else ''
+
+
+def image_group_ids(e: Entry) -> list[str]:
+    d = e.field_dict()
+    h = ' '.join(plain(v) for v in d.values())
+    out = []
+    patterns = [
+        r'(?:Image Group Number|Digital Folder Number|Digital Folder No\.?|Digital Folder|DGS(?: Number)?)\s*[:#]?\s*([A-Z]*[0-9][A-Z0-9_-]*)',
+        r'(?:Film\\?#|Film No\.?|Film Number)\s*[:#]?\s*(0[0-9]{8})',
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, h, re.I):
+            raw = m.group(1).replace('_','')
+            if raw.upper().startswith('DI'):
+                ident = raw.upper()
+            else:
+                digits = re.match(r'([0-9]+)', raw)
+                if not digits:
+                    continue
+                ident = digits.group(1)
+                if len(ident) > 9:
+                    ident = ident[:9]
+            if ident not in out:
+                out.append(ident)
+    return out
+
+
+def clean_howpublished(s: str) -> str:
+    s = plain(s)
+    s = re.sub(r'\s*\[database[^]]*\]\s*', '', s, flags=re.I)
+    s = re.sub(r'\s*\[database with images[^]]*\]\s*', '', s, flags=re.I)
+    if s.lower().startswith(('database on-line','database online','online database')):
+        return ''
+    if s.startswith('http'):
+        return ''
+    return s.strip(' .')
+
+
+def source_title(e: Entry) -> str:
+    if e.key in SOURCE_TITLE_OVERRIDES:
+        return SOURCE_TITLE_OVERRIDES[e.key]
+    d = e.field_dict()
+    title = plain(d.get('title', ''))
+    coll = plain(d.get('collection', ''))
+    how = clean_howpublished(d.get('howpublished', ''))
+    p = platform(e)
+    if p in {'familysearch','ancestry'}:
+        if coll and coll.casefold() not in {'open source collection','internet archive books','allen_county; americana'}:
+            return coll
+        if how and not how.casefold().startswith(('database','image')):
+            return how
+        if ': Entry for ' in title:
+            return title.split(': Entry for ', 1)[0]
+        if ': entry for ' in title:
+            return title.split(': entry for ', 1)[0]
+        # remove leading vendor prefix from a database title
+        title = re.sub(r'^Ancestry\.com\.\s*', '', title, flags=re.I)
+        title = re.sub(r'\s*\[database on-line\]\s*$', '', title, flags=re.I)
+    return title
+
+
+def canonical_key(e: Entry) -> str:
+    if e.key in GROUP_OVERRIDES:
+        return GROUP_OVERRIDES[e.key]
+    if e.key in KEY_OVERRIDES:
+        return KEY_OVERRIDES[e.key]
+    p = platform(e)
+    st = source_title(e)
+    if p == 'familysearch':
+        ids = image_group_ids(e)
+        ident = ids[0] if ids else ark_token(e)
+        # Ensure a census year is retained when a generic title was supplied.
+        if norm(st) == 'united states census':
+            year = re.search(r'\b(18|19|20)\d{2}\b', plain(e.field_dict().get('title','')) + ' ' + plain(e.field_dict().get('year','')))
+            if year:
+                st = f'United States Census, {year.group(0)}'
+        return f"familysearch-{slug(st)}" + (f"-{ident.lower()}" if ident else '')
+    if p == 'ancestry':
+        n = norm(st)
+        if n in ANCESTRY_KEY_BY_TITLE:
+            return ANCESTRY_KEY_BY_TITLE[n]
+        return f'ancestry-{slug(st)}'
+    if p == 'wikitree':
+        u = plain(e.field_dict().get('url',''))
+        m = re.search(r'/wiki/([^/?#]+)', u)
+        return f'wikitree-{slug(m.group(1), 8)}' if m else f'wikitree-{slug(st, 8)}'
+    if p == 'newspapers':
+        # These have explicit key overrides; fallback remains source-centric.
+        date = plain(e.field_dict().get('date','') or e.field_dict().get('year',''))
+        return f'newspapers-{slug(st,10)}-{slug(date,3)}'
+    # General fallback: first author/editor surname + concise title + year.
+    d = e.field_dict()
+    creator = plain(d.get('author','') or d.get('editor','') or d.get('organization','') or d.get('institution',''))
+    first_creator = creator.split(' and ')[0]
+    if ',' in first_creator:
+        surname = first_creator.split(',',1)[0]
+    else:
+        surname = first_creator.split()[-1] if first_creator.split() else 'source'
+    year = plain(d.get('year','') or d.get('date',''))[:4]
+    return '-'.join(x for x in (slug(surname,3), slug(st,10), slug(year,1) if year else '') if x)
+
+
+def preferred_entry(group: list[Entry], key: str) -> Entry:
+    exact = [e for e in group if e.key == key]
+    if exact:
+        return exact[0]
+    # Prefer book/article metadata and the richest field set.
+    ranked = sorted(group, key=lambda e: ((e.type in {'book','article','incollection'}), len(e.field_dict()), -e.start_line), reverse=True)
+    return ranked[0]
+
+
+def collection_url(urls: list[str], platform_name: str) -> str:
+    cleaned = [plain(u) for u in urls if plain(u)]
+    if platform_name == 'ancestry':
+        for u in cleaned:
+            m = re.search(r'/collections/(\d+)', u)
+            if m:
+                return f'https://www.ancestry.com/search/collections/{m.group(1)}/'
+            m = re.search(r':(\d+)(?:\?|$)', u)
+            if m:
+                return f'https://www.ancestry.com/search/collections/{m.group(1)}/'
+        nongeneric = [u for u in cleaned if u.rstrip('/') not in {'https://www.ancestry.com','http://www.ancestry.com'}]
+        return nongeneric[0] if nongeneric else (cleaned[0] if cleaned else '')
+    if platform_name == 'familysearch':
+        image_urls = [u for u in cleaned if '/3:1:' in u]
+        return image_urls[0] if image_urls else (cleaned[0] if cleaned else '')
+    return cleaned[0] if cleaned else ''
+
+
+def merge_group(key: str, group: list[Entry]) -> tuple[str, OrderedDict[str,str], str]:
+    rep = preferred_entry(group, key)
+    p = platform(rep)
+    all_dicts = [e.field_dict() for e in group]
+    fields: OrderedDict[str,str] = OrderedDict()
+
+    # Canonical type and source title.
+    entry_type = rep.type
+    if any(e.key in PUBLICATION_KEY_OVERRIDES for e in group):
+        entry_type = 'book' if not any(e.type == 'article' for e in group) else rep.type
+    if p in {'familysearch','ancestry'} and not any(e.key in PUBLICATION_KEY_OVERRIDES for e in group):
+        entry_type = 'online'
+
+    canonical_title = source_title(rep)
+    # Group overrides may have a better source title in another entry.
+    titles = [source_title(e) for e in group]
+    if key == 'familysearch-medfield-records-007009438':
+        canonical_title = 'Medfield, Massachusetts, Town Records'
+    elif key == 'familysearch-medway-records-007010687':
+        canonical_title = 'Medway, Massachusetts, Town Records'
+    elif key.startswith('familysearch-'):
+        # Prefer a database/collection title, not a record-specific title.
+        candidates = [t for t in titles if not re.search(r'\b(entry|record|birth|death|marriage|will)\b.*\bfor\b|^(birth|death|marriage) of\b', t, re.I)]
+        if candidates:
+            canonical_title = max(candidates, key=len)
+    elif key.startswith('ancestry-'):
+        candidates = [t for t in titles if t]
+        if candidates:
+            canonical_title = max(candidates, key=lambda t: (not re.search(r'\b(entry|record)\b.*\bfor\b',t,re.I), len(t)))
+
+    fields['title'] = canonical_title
+
+    # Preserve creator and source-level publication metadata from the richest entries.
+    ordered_names = ['author','editor','organization','publisher','institution','booktitle','journaltitle','journal','series','volume','number','edition','address','location','isbn','issn','pages','date','year','type','recordgroup']
+    for name in ordered_names:
+        vals=[]
+        for d in all_dicts:
+            v=plain(d.get(name,''))
+            if v and v not in vals:
+                vals.append(v)
+        if vals:
+            # Platform identity replaces person-as-author where appropriate.
+            if name == 'author' and p in {'familysearch','ancestry'} and not any(e.key in PUBLICATION_KEY_OVERRIDES for e in group):
+                continue
+            # Avoid duplicate date and year when date is complete.
+            if name == 'year' and 'date' in fields:
+                continue
+            fields[name] = vals[0]
+
+    if p == 'familysearch' and not any(e.key in PUBLICATION_KEY_OVERRIDES for e in group):
+        fields['organization'] = 'FamilySearch'
+    elif p == 'ancestry' and not any(e.key in PUBLICATION_KEY_OVERRIDES for e in group):
+        fields['organization'] = 'Ancestry.com'
+        fields.setdefault('publisher', 'Ancestry.com Operations, Inc.')
