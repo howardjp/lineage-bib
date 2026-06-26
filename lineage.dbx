@@ -1,0 +1,4 @@
+% BibLaTeX data-model extension for lineage-bib.
+% The filename field mirrors the citation key and is used by the document build.
+\DeclareDatamodelFields[type=field,datatype=literal]{filename}
+\DeclareDatamodelEntryfields{filename}
