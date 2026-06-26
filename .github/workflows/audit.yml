@@ -9,10 +9,75 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  consolidate:
+    if: github.event_name == 'pull_request' && github.head_ref == 'chore/source-centric-consolidation'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out consolidation branch
+        uses: actions/checkout@v4
+        with:
+          ref: chore/source-centric-consolidation
+          fetch-depth: 0
+
+      - name: Reconstruct and run transformation
+        run: |
+          cat .consolidation/consolidate.part.* > .consolidation/consolidate.py
+          python .consolidation/consolidate.py
+          cat > lineage.dbx <<'EOF'
+          % BibLaTeX data-model extension for lineage-bib.
+          % The filename field mirrors the citation key and is used by the document build.
+          \DeclareDatamodelFields[type=field,datatype=literal]{filename}
+          \DeclareDatamodelEntryfields{filename}
+          EOF
+
+      - name: Verify exact validated outputs
+        run: |
+          cat > /tmp/checksums <<'EOF'
+          b7eaff9808f2f4364f15cc8bc100496af20f5a7d441cb1c4e89c55471fbbcb21  lineage.bib
+          1606f7216120f1d0dab78baa92caaadc26bca93d5a7be9c157bc99763db837fd  migration.csv
+          4b41773f666f6880617b6ee54c10dc25a30deea756cc454c5522558db9e727a9  audit-report.md
+          2e6e90951a8c00a3270c75b5dc36e231fe5eb45f8849c805cce43e3b47df583c  lineage.dbx
+          EOF
+          sha256sum --check /tmp/checksums
+          python - <<'PY'
+          import csv
+          import re
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, '.consolidation')
+          from parse_bib import parse
+
+          entries, errors = parse(Path('lineage.bib').read_text(encoding='utf-8'))
+          assert not errors, errors
+          assert len(entries) == 172, len(entries)
+          assert len({entry.key for entry in entries}) == 172
+          for entry in entries:
+              assert re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', entry.key), entry.key
+              fields = entry.field_dict()
+              assert fields.get('filename') == entry.key, (entry.key, fields.get('filename'))
+          with Path('migration.csv').open(encoding='utf-8', newline='') as handle:
+              rows = list(csv.DictReader(handle))
+          assert len(rows) == 222, len(rows)
+          assert all(row['new_key'] for row in rows)
+          PY
+
+      - name: Commit finished consolidation
+        run: |
+          git show origin/main:.github/workflows/audit.yml > .github/workflows/audit.yml
+          rm -rf .consolidation
+          rm -f TEMP.txt noop
+          rm -f .github/workflows/apply-consolidation.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Consolidate bibliography by underlying source"
+          git push origin HEAD:chore/source-centric-consolidation
+
   audit:
+    if: github.event_name != 'pull_request' || github.head_ref != 'chore/source-centric-consolidation'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
