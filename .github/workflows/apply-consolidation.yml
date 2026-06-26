@@ -3,7 +3,7 @@ name: Apply source-centric consolidation
 on:
   push:
     branches:
-      - chore/source-centric-consolidation
+      - main
 
 permissions:
   contents: write
@@ -12,10 +12,10 @@ jobs:
   consolidate:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out consolidation branch
+      - name: Check out main
         uses: actions/checkout@v4
         with:
-          ref: chore/source-centric-consolidation
+          ref: main
           fetch-depth: 0
 
       - name: Reconstruct and run transformation
@@ -62,6 +62,7 @@ jobs:
 
       - name: Commit finished consolidation
         run: |
+          git show 249a6fc14d93b2dbd9a249c48ed8a505ebd98c7f:.github/workflows/audit.yml > .github/workflows/audit.yml
           rm -rf .consolidation
           rm -f TEMP.txt noop
           rm -f .github/workflows/apply-consolidation.yml
@@ -69,4 +70,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -m "Consolidate bibliography by underlying source"
-          git push origin HEAD:chore/source-centric-consolidation
+          git push origin HEAD:main
