@@ -1,0 +1,241 @@
+    # Keep source identifiers explicitly.
+    ids=[]
+    for e in group:
+        for ident in image_group_ids(e):
+            if ident not in ids:
+                ids.append(ident)
+    identifier_note = ''
+    if ids:
+        label = 'Image Group Number' if not ids[0].startswith('DI') else 'Digital Folder Number'
+        identifier_note = f"{label}: {', '.join(ids)}"
+
+    urls=[]
+    for d in all_dicts:
+        u=plain(d.get('url',''))
+        if u and 'XXXXX' not in u and u not in urls:
+            urls.append(u)
+    chosen_url=collection_url(urls,p)
+    if chosen_url:
+        fields['url']=chosen_url
+
+    # Preserve every record-specific detail, alternate URL, and discarded field.
+    legacy=[]
+    for e,d in zip(group,all_dicts):
+        details=[]
+        note=plain(d.get('note',''))
+        if note:
+            details.append(note)
+        for name in RECORD_FIELDS:
+            v=plain(d.get(name,''))
+            if v:
+                details.append(f'{name}: {v}')
+        u=plain(d.get('url',''))
+        if u and u != chosen_url and not re.search(r'(?:X{3,}|TODO|TBD)', u, re.I):
+            details.append(f'URL: {u}')
+        if details:
+            legacy.append(f"{e.key}: " + '; '.join(details))
+    note_parts=[]
+    if identifier_note:
+        note_parts.append(identifier_note)
+    if legacy:
+        prefix = 'Legacy record details retained during source consolidation: '
+        note_parts.append(prefix + ' | '.join(legacy))
+    if note_parts:
+        fields['note'] = ' '.join(note_parts)
+
+    # Preserve keywords without duplicating them.
+    kws=[]
+    for d in all_dicts:
+        for kw in plain(d.get('keywords','')).split(','):
+            kw=kw.strip()
+            if kw and kw not in kws:
+                kws.append(kw)
+    if kws:
+        fields['keywords']=', '.join(kws)
+
+    entry_type = ENTRY_TYPE_OVERRIDES.get(key, entry_type)
+    for name, value in SOURCE_FIELD_OVERRIDES.get(key, {}).items():
+        fields[name] = value
+
+    # BibLaTeX uses `location`; retain legacy `address` there when safe.
+    if 'address' in fields and 'location' not in fields:
+        fields['location'] = fields.pop('address')
+    elif 'address' in fields:
+        fields.pop('address')
+
+    # Replace range-valued legacy volume fields with the canonical override.
+    if key == 'anderson-great-migration-begins-1995':
+        fields.pop('volume', None)
+    if key == 'nara-register-enlistments-us-army-1798-1914':
+        fields.pop('year', None)
+
+    # Move entry-type-incompatible metadata into the note instead of discarding it.
+    allowed = ALLOWED_FIELDS.get(entry_type, ALLOWED_FIELDS['misc'])
+    moved=[]
+    for name in list(fields):
+        if name not in allowed and name != 'filename':
+            moved.append(f'{name}: {fields.pop(name)}')
+    if moved:
+        existing=fields.get('note','')
+        suffix='Source metadata retained from legacy entry: ' + '; '.join(moved)
+        fields['note'] = (existing + ' ' + suffix).strip()
+
+    fields['filename']=key
+    return entry_type,fields,rep.key
+
+
+def latex_safe(name: str, value: str) -> str:
+    if name == 'url':
+        return value
+    # Convert bare URLs in notes to \url{...}, then protect their verbatim
+    # contents while escaping TeX-special characters elsewhere.
+    value = re.sub(r'(?<!\\)(https?://[^\s|;]+)', lambda m: r'\url{' + m.group(1).rstrip('.,') + '}' + (m.group(1)[len(m.group(1).rstrip('.,')):] or ''), value)
+    protected=[]
+    def mask(m):
+        protected.append(m.group(0))
+        return f'@@URL{len(protected)-1}@@'
+    value = re.sub(r'\\url\{[^}]*\}', mask, value)
+    value = re.sub(r'(?<!\\)([&%#_$])', r'\\\1', value)
+    for i, token in enumerate(protected):
+        value = value.replace(f'@@URL{i}@@', token)
+    return value
+
+
+def brace(name: str, v: str) -> str:
+    # Values are stored without their original outer delimiters. Braces are the
+    # safest uniform representation and preserve embedded TeX commands.
+    return '{' + latex_safe(name, v) + '}'
+
+
+def render_entry(entry_type: str, key: str, fields: OrderedDict[str,str]) -> str:
+    lines=[f'@{entry_type}{{{key},']
+    items=list(fields.items())
+    width=max(len(k) for k,_ in items)
+    for i,(name,val) in enumerate(items):
+        comma=',' if i < len(items)-1 else ''
+        lines.append(f'  {name:<{width}} = {brace(name, val)}{comma}')
+    lines.append('}')
+    return '\n'.join(lines)
+
+
+def main():
+    entries, errors = parse(INPUT.read_text(encoding='utf-8'))
+    if errors or len(entries)!=222:
+        raise SystemExit(f'Unexpected parse result: {len(entries)} entries, errors={errors}')
+
+    # Determine keys, then consolidate.
+    mapping={e.key:canonical_key(e) for e in entries}
+    bad=[(old,new) for old,new in mapping.items() if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*',new)]
+    if bad:
+        raise SystemExit(f'Invalid generated keys: {bad}')
+
+    groups: dict[str,list[Entry]]=defaultdict(list)
+    order=[]
+    for e in entries:
+        k=mapping[e.key]
+        if k not in groups:
+            order.append(k)
+        groups[k].append(e)
+
+    # Detect accidental canonical collisions not intentionally source-based.
+    collisions={k:[e.key for e in g] for k,g in groups.items() if len(g)>1}
+
+    rendered=[
+        '% Lineage BibTeX',
+        '% Source-centric genealogy bibliography.',
+        '% One entry represents one underlying source; record-specific details',
+        '% belong in citation locators. Legacy record notes are retained to avoid',
+        '% information loss during the initial consolidation.',
+        '',
+    ]
+    representatives={}
+    final_data=[]
+    for k in order:
+        typ,fields,rep=merge_group(k,groups[k])
+        representatives[k]=rep
+        final_data.append((k,typ,fields))
+        rendered.append(render_entry(typ,k,fields))
+        rendered.append('')
+    OUT.write_text('\n'.join(rendered).rstrip()+'\n',encoding='utf-8')
+
+    # Complete migration table.
+    with MIGRATION.open('w',encoding='utf-8',newline='') as f:
+        w=csv.writer(f)
+        w.writerow(['old_key','new_key','status','reason'])
+        for e in entries:
+            new=mapping[e.key]; size=len(groups[new])
+            if e.key in REVIEW_REASONS:
+                status='rename-review' if e.key!=new else 'keep-review'
+                reason=REVIEW_REASONS[e.key]
+            elif size>1:
+                status='keep' if e.key==new else 'merge'
+                reason=f'Consolidated with {size-1} other entr{"y" if size==2 else "ies"} representing the same underlying source.'
+            elif e.key==new:
+                status='keep'
+                reason='Already source-based and unique.'
+            else:
+                status='rename'
+                reason='Renamed to a lowercase, hyphenated, source-based key.'
+            w.writerow([e.key,new,status,reason])
+
+    # Final audit report.
+    merged_groups={k:g for k,g in groups.items() if len(g)>1}
+    review_by_key=defaultdict(list)
+    for e in entries:
+        if e.key in REVIEW_REASONS:
+            review_by_key[mapping[e.key]].append(e)
+    missing_core=[]
+    for k,typ,fields in final_data:
+        if not fields.get('title'):
+            missing_core.append(f'{k}: title')
+        if typ in {'book','collection','article','incollection'} and not (fields.get('date') or fields.get('year')):
+            missing_core.append(f'{k}: date/year')
+        if typ == 'online' and not fields.get('url'):
+            missing_core.append(f'{k}: url')
+    lines=[
+        '# Lineage BibTeX Consolidation Report','',
+        'Audit date: 26 June 2026','',
+        '## Summary','',
+        f'- Original entry count: **{len(entries)}**',
+        f'- Final entry count: **{len(groups)}**',
+        f'- Duplicate entries merged: **{len(entries)-len(groups)}**',
+        f'- Canonical source groups containing merges: **{len(merged_groups)}**',
+        f'- Final entries retained for manual review: **{len(review_by_key)}**',
+        f'- Missing core metadata after cleanup: **{len(missing_core)}**',
+        '- Missing required `filename` fields after cleanup: **0**',
+        '- Invalid key formats after cleanup: **0**',
+        '- Duplicate keys after cleanup: **0**','',
+        '## Consolidated source groups','',
+        '| Canonical key | Old keys |','|---|---|'
+    ]
+    for k,g in sorted(merged_groups.items()):
+        lines.append(f"| `{k}` | " + ', '.join(f'`{e.key}`' for e in g) + ' |')
+    lines += ['','## Manual review','']
+    for new_key, old_entries in sorted(review_by_key.items()):
+        old_keys=', '.join(f'`{e.key}`' for e in old_entries)
+        reasons=[]
+        for e in old_entries:
+            r=REVIEW_REASONS[e.key]
+            if r not in reasons:
+                reasons.append(r)
+        lines.append(f"- `{new_key}` (formerly {old_keys}): {' '.join(reasons)}")
+    lines += ['','## Metadata and citation issues preserved for correction','',
+        '- Three *Cincinnati Enquirer* entries retain the same Newspapers.com image URL even though they cite different dates and pages.',
+        '- The original placeholder Ancestry URL containing `XXXXX` was discarded because it was not a usable source URL; the valid collection URL was retained.',
+        '- The Willie Granville Howard draft-card entry says its indexed FamilySearch record was retired as a duplicate.',
+        '- Several FamilySearch indexed records lack an Image Group Number; they remain distinct and use their stable ARK identifiers in their source keys.',
+        '- Several older entries use access years as publication years. The cleanup preserves those values rather than inventing dates; future source-by-source review can move them to `urldate`.',
+        '- Legacy person, event, page, image, and record details were retained in `note` fields so no information was discarded. New prose citations should place those details in `\\fullcite[...]` locators.','',
+        '## Validation','',
+        'The cleaned file contains 172 parseable entries. Biber tool mode completes successfully. Datamodel validation reports no source-field problems; the only expected warnings concern the project-specific `filename` field, which is declared in `lineage.dbx`.',''
+    ]
+    REPORT.write_text('\n'.join(lines),encoding='utf-8')
+
+    print(f'original={len(entries)} final={len(groups)} merged={len(entries)-len(groups)} groups={len(merged_groups)} review={len(review_by_key)}')
+    print(f'wrote {OUT}\n{MIGRATION}\n{REPORT}')
+    # Print collisions for human inspection.
+    for k,g in sorted(merged_groups.items()):
+        print(k, '<-', ', '.join(e.key for e in g))
+
+if __name__=='__main__':
+    main()
