@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+import csv
+import re
+import sys
+import unicodedata
+from collections import defaultdict, OrderedDict
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from parse_bib import parse, Entry
+
+INPUT = Path('lineage.bib')
+OUT = Path('lineage.bib')
+MIGRATION = Path('migration.csv')
+REPORT = Path('audit-report.md')
+
+RECORD_FIELDS = {
+    'eventtype','eventdate','eventplace','father','mother','cemetery','person',
+    'details','data','addendum','file','subject','comment','description','rights',
+    'ocr','ppi','scanner','itemsize','addeddate','bookplateleaf','boxid','camera',
+    'collectionset','dimensions'
+}
+
+# Explicitly approved or obvious source groups. Remaining FamilySearch records
+# consolidate automatically only when they share an image-group/digital-folder
+# identifier or exact ARK record identifier.
+GROUP_OVERRIDES = {
+    # Ancestry databases
+    'ancestry-daniel-bithiah-1754': 'ancestry-massachusetts-town-vital-records-1620-1988',
+    'adams:massachusetts:barre:vital:2011': 'ancestry-massachusetts-town-vital-records-1620-1988',
+    'ancestry:thompson:kesiah:1730': 'ancestry-massachusetts-town-vital-records-1620-1988',
+    'ancestry:fisk:kezia:1814': 'ancestry-massachusetts-town-vital-records-1620-1988',
+    'ancestry-thompson-hannah-1748': 'ancestry-massachusetts-town-vital-records-1620-1988',
+    'ancestry:adams-nathan:1800': 'ancestry-massachusetts-town-vital-records-1620-1988',
+    'ancestry:adams:nathan:1825': 'ancestry-massachusetts-town-vital-records-1620-1988',
+    'ancestry:adams:nathan:1751': 'ancestry-massachusetts-town-vital-records-1620-1988',
+    'graves:mary:marriage:1668': 'ancestry-new-england-marriages-prior-to-1700',
+    'ancestry:thomson-susanna-1698': 'ancestry-new-england-marriages-prior-to-1700',
+    'ida:williams:death:cert:1908': 'ancestry-indiana-death-certificates-1899-2017',
+    'jha:death:cert:1910': 'ancestry-indiana-death-certificates-1899-2017',
+    'reb:death:cert:1913': 'ancestry-indiana-death-certificates-1899-2017',
+    'snider:findagrave:1907': 'ancestry-us-find-a-grave-index-1600s-current',
+    'cornett:findagrave:2012': 'ancestry-us-find-a-grave-index-1600s-current',
+    'fh:census:1880': 'ancestry-1880-united-states-federal-census',
+    'howard:census:1880': 'ancestry-1880-united-states-federal-census',
+    'jonathan:newman:will:probate:1855': 'ancestry-ohio-wills-probate-records-1786-1998',
+    'newman:jonathan:probate:1855': 'ancestry-ohio-wills-probate-records-1786-1998',
+    'newman:cloud:marriage:1797': 'ancestry-us-quaker-meeting-records-1681-1994',
+    'anne:cloud:birth:1773': 'ancestry-us-quaker-meeting-records-1681-1994',
+    'ray:pow:1865': 'ancestry-civil-war-prisoner-of-war-records-1861-1865',
+    'ray:wm:pow:1865': 'ancestry-civil-war-prisoner-of-war-records-1861-1865',
+    'wn:graves:registration:1866': 'ancestry-ohio-soldier-grave-registrations-1804-1958',
+    'newman:wesley:grave:1866': 'ancestry-ohio-soldier-grave-registrations-1804-1958',
+    'meh:ssa:record:1981': 'ancestry-social-security-applications-claims-1936-2007',
+    'howard:marcus:ssa:1981': 'ancestry-social-security-applications-claims-1936-2007',
+    'meh:death:index:1981': 'ancestry-ohio-death-records-1908-2022',
+    'ags:death:record:1961': 'ancestry-ohio-death-records-1908-2022',
+
+    # Publications represented in more than one interface
+    'anderson:gmb:1995': 'anderson-great-migration-begins-1995',
+    'americanancestors:gmb:2010': 'anderson-great-migration-begins-1995',
+
+    # FamilySearch image groups and exact duplicate records
+    'familysearch-medfield-records-007009438': 'familysearch-medfield-records-007009438',
+    'familysearch-daniel-hannah-1701': 'familysearch-medfield-records-007009438',
+    'familysearch:thompson:eleazer:1702': 'familysearch-medfield-records-007009438',
+    'familysearch:adams:nathan:1772': 'familysearch-medway-records-007010687',
+    'familysearch-thompson-eleazer-1725': 'familysearch-medway-records-007010687',
+    'familysearch:adams-nathan:1750': 'familysearch-medway-records-007010687',
+    'danniells:birth:1702': 'familysearch-connecticut-vital-records-008272229',
+    'daniels:marriage:1724': 'familysearch-connecticut-vital-records-008272229',
+    'jn:rp:marriage:cert:1829': 'familysearch-ohio-county-marriages-004016605',
+    'newman:joseph:marriage:1829': 'familysearch-ohio-county-marriages-004016605',
+    'newman:benjamin:marriage:1874': 'familysearch-ohio-county-marriages-004030292',
+    'bfn:mmp:marriage:record:1874': 'familysearch-ohio-county-marriages-004030292',
+    'rees:roscoe:birth:1882': 'familysearch-ohio-county-births-004016861',
+    'ryr:birth:rec:1882': 'familysearch-ohio-county-births-004016861',
+    'newman:chelsie:birth:1890': 'familysearch-ohio-county-births-004017450',
+    'cen:birth:record:1890': 'familysearch-ohio-county-births-004017450',
+    'rees:roscoe:census:1920': 'familysearch-united-states-census-1920-004967549',
+    'ryr:cen:census:1920': 'familysearch-united-states-census-1920-004967549',
+    'newman:benjamin:death:1922': 'familysearch-ohio-deaths-004022913',
+    'bfn:death:cert:1922': 'familysearch-ohio-deaths-004022913',
+    'newman:mary:death:1943': 'familysearch-ohio-deaths-004028080',
+    'mmp:death:cert:1943': 'familysearch-ohio-deaths-004028080',
+    'meh:mrs:marriage:abstract:1950': 'familysearch-ohio-county-marriages-005261999',
+    'howard:snyder:marriage:1950': 'familysearch-ohio-county-marriages-005261999',
+    'mrs:numident:2004': 'familysearch-numident-di0001099',
+    'snyder:martha:numident:2004': 'familysearch-numident-di0001099',
+    'hlw:death:certificate:1950': 'familysearch-ohio-deaths-004109222',
+    'williams:death:1950': 'familysearch-ohio-deaths-004109222',
+    'jm:census:1900': 'familysearch-united-states-census-1900-004117743',
+    'mcneal:census:1900': 'familysearch-united-states-census-1900-004117743',
+    'hlw:jm:marriage:cert:1907': 'familysearch-kentucky-marriages-004263448',
+    'mcneal:Kentucky:marriage:1907': 'familysearch-kentucky-marriages-004263448',
+    'harry:williams:census:1910': 'familysearch-united-states-census-1910-004973199',
+    'williams:harry:census:1910': 'familysearch-united-states-census-1910-004973199',
+    'ags:draft:card:ww1:1917': 'familysearch-world-war-i-draft-registration-005256033',
+    'snyder:wwi:draft:1917': 'familysearch-world-war-i-draft-registration-005256033',
+    'snider:birth:1855': 'familysearch-west-virginia-births-007499359',
+    'snider:john:birth:1855': 'familysearch-west-virginia-births-007499359',
+    'snyder:death:1930': 'familysearch-ohio-deaths-004000569',
+    'snyder:martha:death:1930': 'familysearch-ohio-deaths-004000569',
+    'ray:bench:marriage:1814': 'familysearch-ohio-county-marriages-004016206',
+    'ray:william:bench:sally:marriage:1814': 'familysearch-ohio-county-marriages-004016206',
+    'snyder:martha:marriage:1881': 'familysearch-ohio-county-marriages-004016278',
+    'snyder:john:martha:marriage:1881': 'familysearch-ohio-county-marriages-004016278',
+    'graves:death:1917': 'familysearch-ohio-deaths-004021648',
+    'wilson:tacy:death:1917': 'familysearch-ohio-deaths-004021648',
+    'mjc:census:1920': 'familysearch-united-states-census-1920-004967469',
+    'cavender:mary:census:1920': 'familysearch-united-states-census-1920-004967469',
+    'ray:census:1860': 'familysearch-united-states-census-1860-005170959',
+    'ray:martha:census:1860': 'familysearch-united-states-census-1860-005170959',
+    'ray:census:1870': 'familysearch-united-states-census-1870-004278470',
+    'ray:martha:census:1870': 'familysearch-united-states-census-1870-004278470',
+    'familysearch:probate:worcester-1748': 'familysearch-worcester-probate-records-007704428',
+
+    # Additional exact-source consolidations now resolvable from the full file
+    'ray:graves:marriage:1845': 'familysearch-ohio-county-marriages-004016273',
+    'ray:william:graves:tacy:marriage:1845': 'familysearch-ohio-county-marriages-004016273',
+    'newman:joseph:1850:census': 'familysearch-united-states-census-1850-004204706',
+    'jn:rn:wn:census:1850': 'familysearch-united-states-census-1850-004204706',
+    'newman:joseph:1860:census': 'familysearch-united-states-census-1860-005170960',
+    'jn:rn:wn:census:1860': 'familysearch-united-states-census-1860-005170960',
+}
+
+# Entries that happen to be delivered by Ancestry/AmericanAncestors but whose
+# underlying source is a book/article rather than the platform database.
+PUBLICATION_KEY_OVERRIDES = {
+    'mc:hc:quaker:meeting:record:1757': 'moore-record-kingwood-monthly-meeting-1983',
+    'hc:probate:abstract:1784': 'burns-abbeville-will-books-volume-1-1947',
+    'graves:death:1780': 'white-barbour-connecticut-vital-records-volume-10-2006',
+    'joseph:cloud:quaker:genealogy:1743': 'hinshaw-encyclopedia-american-quaker-genealogy-volume-1',
+    'jn:quaker:birth:1809': 'hinshaw-encyclopedia-american-quaker-genealogy-volume-6',
+    'anderson:great:migration:2003': 'anderson-great-migration-1634-1635-volume-3-2003',
+    'anderson:book:2007': 'anderson-great-migration-1634-1635-volume-5-2007',
+}
+
+KEY_OVERRIDES = {
+    'learned:family:1882': 'learned-larned-learned-family-1882',
+    'fairbanks:genealogy:1897': 'fairbanks-genealogy-1897',
+    'vanwagenen:stearns:1901': 'van-wagenen-genealogy-memoirs-isaac-stearns-1901',
+    'meh:census:1900': 'nara-united-states-census-1900-t623-1264-page-10',
+    'latting1881genealogy': 'latting-genealogy-rev-william-addams-1881',
+    'meh:obit:1953': 'dayton-daily-news-1953-02-24',
+    'williams:death:1934': 'monticello-herald-thornton-williams-death-notice-1934-06-14',
+    'census:williams:1880': 'nara-united-states-census-1880-t9-706-page-488c',
+    'mayo1996': 'mayo-sixteen-hundred-lines-pilgrims-1996',
+    'austin:bunnel:2e': 'austin-bunnell-bonnell-family-america-2007',
+    'snyder_fullmer_marriage_license_1938': 'cincinnati-enquirer-marriage-licenses-1938-06-14-page-19',
+    'snyder_williams_divorce_1933': 'cincinnati-enquirer-divorce-proceedings-1933-09-30-page-9',
+    'snyder_williams_marriage_1927': 'cincinnati-enquirer-marriage-licenses-1927-05-07-page-16',
+    'cfc:obit:1970': 'greenville-daily-advocate-charles-cavender-obituary-1970-03-25',
+    'rer:mjr:obit': 'troy-daily-news-rees-cavender-obituaries-2003-04-26',
+    'neghs:bigelow:2020': 'nehgs-early-new-england-families-john-bigelow-2020',
+    'partridge:1903': 'partridge-john-partridge-medfield-descendants-1903',
+    'hrw:birth:1908': 'cincinnati-birth-death-records-1908-page-21',
+    'bond:watertown:1860': 'bond-genealogies-watertown-1860',
+    'trw:death:cert:1934': 'indiana-death-certificate-thornton-williams-1934-roll-12',
+    'beatty:baumgardner:1972': 'beatty-baumgardner-family-1972',
+    'kozee:pioneer:families:1957:bunnell:donivan': 'kozee-pioneer-families-kentucky-1957',
+    'hamelle:standard:history:white:county:1915': 'hamelle-history-white-county-indiana-1915',
+    'bunnell:newsletter:9:3': 'austin-another-nathaniel-1995',
+    'nj:wills:1901': 'nelson-calendar-new-jersey-wills-volume-23-1901',
+    'bunker:longisland:genealogies:1895': 'bunker-long-island-genealogies-1895',
+    'sanborn2003torreys': 'sanborn-third-supplement-torrey-2003',
+    'bunnell:register:enlistments:1812': 'nara-register-enlistments-us-army-1798-1914',
+    'austin:bunnell:bonnell:1999': 'austin-bunnell-bonnell-family-america-1999',
+    'jackson:newspaper:1870': 'jackson-standard-early-marriages-1870-02-17',
+    'dixon:our:book:1932': 'dixon-our-book-1932',
