@@ -1,0 +1,33 @@
+name: Audit bibliography
+
+on:
+  push:
+    branches:
+      - main
+      - chore/source-centric-foundation
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Generate audit artifacts
+        run: |
+          mkdir -p artifacts
+          python scripts/audit_bib.py lineage.bib \
+            --report artifacts/audit-report.md \
+            --json artifacts/audit.json \
+            --migration-candidates artifacts/migration-candidates.csv
+
+      - name: Upload audit artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-bib-audit
+          path: artifacts/
